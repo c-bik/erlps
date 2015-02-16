@@ -1,5 +1,6 @@
 #!/bin/bash
 
+unamestr=`uname`
 if [[ "$unamestr" == 'Linux' ]]; then
      exename=erl
 else

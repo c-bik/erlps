@@ -58,47 +58,64 @@ list({win32,nt}) ->
             case re:run(os:cmd("wmic process get ProcessId"),
                         "([0-9]+)\s*\r\r\n", [global, {capture, [1], list}]) of
                 {match, Pids} ->
-                    wmic_process_info_async(self(), Pids),
+                    process_info_async(win, self(), Pids),
                     receive
                         {_, ProcessInfos} -> ProcessInfos
                     end
             end
-    end.
+    end;
+list({unix,linux}) ->
+    case re:run(os:cmd("ps ax -o pid"), "([0-9]+)[ \r\n]*",
+                [global, {capture, [1], list}]) of
+        {match, Pids} ->
+            process_info_async(linux, self(), Pids),
+            receive
+                {_, ProcessInfos} -> ProcessInfos
+            end
+    end;
+list(Os) ->
+    {error, {unsupported, Os}}.
 
 -define(BLK_SIZE, 50). % Least resposponse time setting
 
-wmic_process_info_async(Master, Pids) when length(Pids) > ?BLK_SIZE ->
+process_info_async(Os, Master, Pids) when length(Pids) > ?BLK_SIZE ->
     {Pids1, Pids2} = lists:split(length(Pids) div 2, Pids),
     LocalMaster = self(),
     Pids1Pid = spawn(fun() ->
-                             wmic_process_info_async(LocalMaster, Pids1)
+                             process_info_async(Os, LocalMaster, Pids1)
                      end),
     Pids2Pid = spawn(fun() ->
-                             wmic_process_info_async(LocalMaster, Pids2)
+                             process_info_async(Os, LocalMaster, Pids2)
                      end),
-    Master ! {self(), wmic_pinfo_rx_loop({Pids1Pid, Pids2Pid}, [])};
-wmic_process_info_async(Master, Pids) when length(Pids) =< ?BLK_SIZE ->
-    Master ! {self(), wmic_process_info(Pids)}.
+    Master ! {self(), pinfo_rx_loop({Pids1Pid, Pids2Pid}, [])};
+process_info_async(Os, Master, Pids) when length(Pids) =< ?BLK_SIZE ->
+    Master ! {self(), info_process(Os, Pids)}.
 
-wmic_pinfo_rx_loop({undefined, undefined}, PInfos) -> PInfos;
-wmic_pinfo_rx_loop({P1,P2}, PInfos) ->
+pinfo_rx_loop({undefined, undefined}, PInfos) -> PInfos;
+pinfo_rx_loop({P1,P2}, PInfos) ->
     receive
         {P1, PInfs} ->
-            wmic_pinfo_rx_loop({undefined, P2}, PInfs++PInfos);
+            pinfo_rx_loop({undefined, P2}, PInfs++PInfos);
         {P2, PInfs} ->
-            wmic_pinfo_rx_loop({P1, undefined}, PInfs++PInfos)
+            pinfo_rx_loop({P1, undefined}, PInfs++PInfos)
     end.
 
-wmic_process_info(Pids) ->
-    wmic_process_info([lists:flatten(P) || P <- Pids], []).
-wmic_process_info([], ProcessInfos) -> ProcessInfos;
-wmic_process_info([Pid|Pids], ProcessInfos) ->
-    wmic_process_info(
-      Pids, [#{ pid => list_to_integer(Pid),
-                name => wmic_fmt_field(Pid, "Name")}
-             | ProcessInfos]).
+info_process(Os, Pids) ->
+    info_process(Os, [lists:flatten(P) || P <- Pids], []).
+info_process(_Os, [], ProcessInfos) -> ProcessInfos;
+info_process(Os, [Pid|Pids], ProcessInfos) ->
+    info_process(Os, Pids,
+                 [#{pid => list_to_integer(Pid),
+                    name => fmt_field(Os, Pid, "Name")}
+                 | ProcessInfos]).
 
-wmic_fmt_field(Pid, Field) ->
+fmt_field(linux, Pid, "Name") -> fmt_field(linux, Pid, "cmd");
+fmt_field(linux, Pid, Field) ->
+    re:replace(
+      os:cmd(lists:flatten(["ps -p ", Pid, " -o ", Field])),
+      lists:flatten(["(",string:to_upper(Field),"\s*[\r\n]+)|([ \r\n]+)"]),
+      "", [global, {return, list}]);
+fmt_field(win, Pid, Field) ->
     re:replace(
       os:cmd(lists:flatten(
                ["wmic process where ProcessId=\"",
